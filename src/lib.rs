@@ -12,7 +12,7 @@ use dd::Criteria;
 use proc_macro2::TokenStream;
 
 use smol_str::SmolStr;
-use tempfile::Builder;
+use tempfile::{Builder, NamedTempFile};
 
 /// how a node is organized
 #[derive(Clone)]
@@ -72,16 +72,20 @@ pub enum ReplacementRule {
     GenericArg,
     QPath,
     Use,
+    Block,
 }
 
 impl ReplacementRule {
     fn replaces(&self, other: &Self) -> bool {
         use ReplacementRule::*;
 
-        match (self, other) {
+        let replacer = self;
+        let replacee = other;
+        match (replacer, replacee) {
             (Exempt, Exempt) => false,
             (a, b) if discriminant(a) == discriminant(b) => true,
-            (GenericMethodArg, GenericArg) => true,
+            (GenericMethodArg, GenericArg) | (Block, Expr) => true,
+
             _ => false,
         }
     }
@@ -133,6 +137,7 @@ impl Node {
 }
 
 pub enum ReduceRule {
+    Fn(Box<dyn Fn(NamedTempFile) -> bool>),
     Program(PathBuf),
 }
 
@@ -151,6 +156,7 @@ impl Reducer {
         write!(tempfile.as_file_mut(), "{}", &self.root)?;
 
         match &self.rule {
+            ReduceRule::Fn(f) => Ok(f(tempfile)),
             ReduceRule::Program(prog) => {
                 let status = Command::new(prog)
                     .current_dir(tempfile.path().parent().unwrap())
@@ -170,22 +176,34 @@ impl Reducer {
     }
 
     fn reduce_inner(&self, node: &Node) -> io::Result<()> {
-        match &node.optional {
-            OptionalStatus::Optional => {
-                // if we can delete the thing..
-                if self.try_replace_node_with(node, String::new())? {
-                    // .. replace it with whitespace. Not empty string though,
-                    // because it could mess up other tokens by joining them
-                    *node.kind.borrow_mut() = NodeKind::Regular {
-                        s: SmolStr::new(" "),
-                    };
-                    // .. and remove its children.
-                    node.children.borrow_mut().clear();
-                    // nothing to recurse
-                    return Ok(());
-                }
+        if let OptionalStatus::Optional = node.optional {
+            // if we can delete the thing..
+            if self.try_replace_node_with(node, String::new())? {
+                // .. replace it with whitespace. Not empty string though,
+                // because it could mess up other tokens by joining them
+                *node.kind.borrow_mut() = NodeKind::Regular {
+                    s: SmolStr::new(" "),
+                };
+                // .. and remove its children.
+                node.children.borrow_mut().clear();
+                // nothing to recurse
+                return Ok(());
             }
-            OptionalStatus::Required => {}
+        }
+
+        let kind = node.kind.borrow();
+
+        match &*kind {
+            NodeKind::KleeneStar | NodeKind::KleenePlus => {
+                drop(kind);
+                // temporarily take children from the node.
+                let mut items = mem::take(&mut *node.children.borrow_mut());
+                // the branch criteria will replace the kleene node
+                // with a temp string containing formatted node. It's children must be empty.
+                dd::ddmin(&mut items, &mut Branch { reducer: self, kleene: node });
+
+                *node.children.borrow_mut() = items;
+            }
             _ => {}
         }
 
@@ -205,7 +223,7 @@ impl Reducer {
 /// a branch used to reduce a kleene node
 pub struct Branch<'a> {
     /// root node of tree
-    root: &'a Node,
+    reducer: &'a Reducer,
     /// the kleene node that we are working on.
     kleene: &'a Node,
 }
@@ -215,7 +233,21 @@ impl Criteria<Node> for Branch<'_> {
     where
         Node: 'a,
     {
-        false
+        let mut iter = iter.into_iter().peekable();
+        if let NodeKind::KleenePlus = &*self.kleene.kind.borrow() {
+            // kleene plus does not allow an empty sequence.
+            if iter.peek().is_none() {
+                return false;
+            }
+        }
+
+        let prev_kind = mem::replace(
+            &mut *self.kleene.kind.borrow_mut(),
+            NodeKind::Temp(iter.map(|n| format!("{n} ")).collect()),
+        );
+        let res = self.reducer.try_().unwrap();
+        *self.kleene.kind.borrow_mut() = prev_kind;
+        res
     }
 }
 

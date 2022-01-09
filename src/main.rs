@@ -2,8 +2,7 @@ use std::error::Error;
 use std::path::Path;
 
 use reduceit::lower::Lower;
-use reduceit::{Reducer, ReduceRule};
-
+use reduceit::{ReduceRule, Reducer};
 
 fn main() -> Result<(), std::boxed::Box<dyn Error>> {
     let file = syn::parse_file(r#"pub fn main() -> () {}"#)?;

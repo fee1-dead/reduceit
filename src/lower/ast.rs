@@ -10,7 +10,7 @@ use quote::ToTokens;
 use syn::punctuated::Pair;
 use syn::*;
 
-use crate::{Node, NodeKind, ReplacementRule as R, OptionalStatus};
+use crate::{Node, NodeKind, OptionalStatus, ReplacementRule as R};
 
 use super::{Lower, LowerDelim, LowerKleene, LowerOpt};
 
@@ -698,7 +698,7 @@ struct_lower_impl! {
         )]
     }
 
-    struct Block[Exempt] {
+    struct Block[Block] {
         [brace_token([stmts*])]
     }
 
@@ -882,9 +882,7 @@ impl LowerOpt for ReturnType {
             let mut node = Node::simple(vec![arr.lower(), ty.lower()]);
             node.optional = OptionalStatus::Optional;
             list.push(node);
-        } else {
-            return;
-        };
+        }
     }
 }
 

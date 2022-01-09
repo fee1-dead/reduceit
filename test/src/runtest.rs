@@ -1,11 +1,11 @@
 use std::error::Error;
-use std::io::{Write, Read, Seek, SeekFrom};
 use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
-use reduceit::Reducer;
 use reduceit::lower::Lower;
+use reduceit::Reducer;
 use tempfile::Builder;
 
 pub fn run(path: PathBuf) {
@@ -16,23 +16,45 @@ pub fn run(path: PathBuf) {
 }
 
 fn run_(path: PathBuf) -> Result<(), Box<dyn Error>> {
+    let file_name = path.file_name().unwrap().to_str().unwrap();
     let s = fs::read_to_string(&path)?;
     let file = syn::parse_file(&s)?;
     drop(s);
     let node = file.lower();
 
+    let expected_output = fs::read(path.with_file_name(format!("{file_name}.output")))?;
+
     let reducer = Reducer {
         root: node,
-        rule: reduceit::ReduceRule::Program(PathBuf::from("rustc")),
+        rule: reduceit::ReduceRule::Fn(Box::new(move |tmp| {
+            let prog = tmp.path().parent().unwrap().join("prog");
+
+            if !Command::new("rustc")
+                .arg(tmp.path())
+                .arg("-o")
+                .arg(&prog)
+                .stderr(Stdio::null())
+                .stdout(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+            {
+                return false;
+            }
+
+            let stdout = Command::new(prog).output().unwrap().stdout;
+            stdout == expected_output
+        })),
     };
 
     reducer.reduce()?;
 
-    let mut f = Builder::new().prefix("reducetest").suffix(".rs").tempfile()?;
+    let mut f = Builder::new()
+        .prefix("reducetest")
+        .suffix(".rs")
+        .tempfile()?;
 
-    let Reducer {
-        root, ..
-    } = reducer;
+    let Reducer { root, .. } = reducer;
 
     write!(f, "{root}")?;
 
@@ -44,12 +66,15 @@ fn run_(path: PathBuf) -> Result<(), Box<dyn Error>> {
     f.seek(SeekFrom::Start(0))?;
     f.read_to_string(&mut found)?;
     let mut expected_path = path;
-    expected_path.set_file_name(format!("{}.reduced", expected_path.file_name().unwrap().to_str().unwrap()));
-    let expected = fs::read_to_string(expected_path)?;
+    expected_path.set_file_name(format!(
+        "{}.reduced",
+        expected_path.file_name().unwrap().to_str().unwrap()
+    ));
+    let expected = fs::read_to_string(&expected_path)?;
 
     if found != expected {
         panic!("found: {found}, expected: {expected}");
     }
-    
+
     Ok(())
 }
