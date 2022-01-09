@@ -1,4 +1,4 @@
-use crate::Node;
+use crate::{Node, OptionalStatus};
 
 use super::Lower;
 
@@ -10,7 +10,9 @@ impl<T: Lower> LowerOpt for Option<T> {
     #[inline]
     fn lower_into(self, list: &mut Vec<Node>) {
         if let Some(v) = self {
-            list.push(v.lower());
+            let mut node = v.lower();
+            node.optional = OptionalStatus::Optional;
+            list.push(node);
         }
     }
 }

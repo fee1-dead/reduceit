@@ -27,7 +27,7 @@ macro_rules! lower_delim_impl {
 
             #[inline]
             fn lower_end(&self, node: &Node) {
-                node.inner.borrow_mut().children.push(
+                node.children.borrow_mut().push(
                     Node::new(
                         NodeKind::Regular { s: SmolStr::new_inline($right) },
                         ReplacementRule::Exempt,

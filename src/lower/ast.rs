@@ -1,7 +1,6 @@
 //! Lowering for syn's AST nodes.
 //!
-//! This is not called "too much effort",
-//! but rather called "the art of bodging" instead.
+//! This is not called bad code.
 
 use std::cmp;
 
@@ -11,23 +10,28 @@ use quote::ToTokens;
 use syn::punctuated::Pair;
 use syn::*;
 
-use crate::{Node, NodeKind, ReplacementRule as R};
+use crate::{Node, NodeKind, ReplacementRule as R, OptionalStatus};
 
 use super::{Lower, LowerDelim, LowerKleene, LowerOpt};
 
 macro_rules! option_like_lower_impl {
     ($(
-        $Ty:ident::$Some:ident
-    ),*$(,)?) => {$(
+        enum $Ty:ident[None = $None:ident] {
+            $($Some:ident(_)),*$(,)?
+        }
+    )*) => {$(
         impl LowerOpt for $Ty {
             #[inline]
             fn lower_into(self, list: &mut Vec<Node>) {
-                if let Self::$Some(v) = self {
-                    list.push(v.lower());
-                }
+                let mut node = match self {
+                    $(Self::$Some(v) => v.lower(),)*
+                    Self::$None => return,
+                };
+                node.optional = OptionalStatus::Optional;
+                list.push(node);
             }
         }
-    )+};
+    )*};
 }
 
 const fn count_helper<const N: usize>(_: [(); N]) -> usize {
@@ -43,8 +47,8 @@ macro_rules! struct_lower_impl {
     (@lower( $self:ident $children:ident $field:ident ( $( [$($tt:tt)*] ),* $(,)? ))) => {{
         let n = $self.$field.lower_start();
         {
-            let mut nb = n.inner.borrow_mut();
-            let nchildren = &mut nb.children;
+            let mut nb = n.children.borrow_mut();
+            let nchildren = &mut *nb;
 
             $(struct_lower_impl!(@lower($self nchildren $($tt)*));)*
         }
@@ -97,7 +101,7 @@ macro_rules! simple_enum_lower_impl {
         impl Lower for $Ty {
             const RULE: R = R::$rule;
             fn lower(self) -> Node {
-                let node = match self {
+                let mut node = match self {
                     $(
                         Self::$Variant(v) => v.lower(),
                     )*
@@ -111,7 +115,7 @@ macro_rules! simple_enum_lower_impl {
                         _ => Node::verbatim(Self::RULE, self.into_token_stream())
                     )?
                 };
-                node.inner.borrow_mut().rule = Self::RULE;
+                node.rule = Self::RULE;
                 node
             }
         }
@@ -119,11 +123,25 @@ macro_rules! simple_enum_lower_impl {
 }
 
 option_like_lower_impl! {
-    AttrStyle::Inner,
-    TraitBoundModifier::Maybe,
+    enum AttrStyle[None = Outer] {
+        Inner(_),
+    }
+    enum TraitBoundModifier[None = None] {
+        Maybe(_),
+    }
+    enum Fields[None = Unit] {
+        Named(_), Unnamed(_),
+    }
+    enum Visibility[None = Inherited] {
+        Public(_), Crate(_), Restricted(_),
+    }
 }
 
 struct_lower_impl! {
+    struct File[Exempt] {
+        [attrs*], [items*],
+    }
+
     struct Label[Exempt] {
         [name], [colon_token],
     }
@@ -145,7 +163,7 @@ struct_lower_impl! {
 
     struct Path[Path] {
         [leading_colon?],
-        [segments*],
+        [segments+],
     }
 
     struct PathSegment[Exempt] {
@@ -289,7 +307,7 @@ struct_lower_impl! {
         [constness?], [asyncness?], [unsafety?],
         [abi?], [fn_token], [ident], [generics],
         [paren_token([inputs*], [variadic?])],
-        [output],
+        [output?],
     }
 
     struct Receiver[Exempt] {
@@ -395,7 +413,7 @@ struct_lower_impl! {
     struct TypeBareFn[Type] {
         [lifetimes?], [unsafety?], [abi?],
         [fn_token], [paren_token([inputs*], [variadic?])],
-        [output]
+        [output?]
     }
 
     struct TypeGroup[Type] {
@@ -493,7 +511,7 @@ struct_lower_impl! {
     struct ExprClosure[Exempt] {
         [attrs*], [asyncness?], [movability?],
         [capture?], [or1_token], [inputs*],
-        [or2_token], [output], [body],
+        [or2_token], [output?], [body],
     }
 
     struct ExprContinue[Exempt] {
@@ -723,7 +741,7 @@ struct_lower_impl! {
     }
 
     struct ParenthesizedGenericArguments[Exempt] {
-        [paren_token([inputs*])], [output]
+        [paren_token([inputs*])], [output?]
     }
 }
 
@@ -825,17 +843,21 @@ impl Lower for Attribute {
     const RULE: R = R::Attribute;
 
     fn lower(self) -> Node {
-        let inner = if let Ok(meta) = self.parse_meta() {
-            meta.lower()
-        } else {
-            self.tokens.lower()
-        };
-
         let mut children = vec![self.pound_token.lower()];
         self.style.lower_into(&mut children);
         let node = self.bracket_token.lower_start();
-        node.inner.borrow_mut().children.push(self.path.lower());
-        node.inner.borrow_mut().children.push(inner);
+
+        {
+            let mut children = node.children.borrow_mut();
+
+            if let Ok(meta) = self.parse_meta() {
+                children.push(meta.lower());
+            } else {
+                children.push(self.path.lower());
+                children.push(self.tokens.lower());
+            }
+        }
+
         self.bracket_token.lower_end(&node);
         children.push(node);
 
@@ -853,24 +875,23 @@ impl LowerOpt for PathArguments {
     }
 }
 
-impl Lower for ReturnType {
-    const RULE: R = R::Exempt;
+impl LowerOpt for ReturnType {
     #[inline]
-    fn lower(self) -> Node {
-        let children = if let Self::Type(arr, ty) = self {
-            vec![arr.lower(), ty.lower()]
+    fn lower_into(self, list: &mut Vec<Node>) {
+        if let Self::Type(arr, ty) = self {
+            let mut node = Node::simple(vec![arr.lower(), ty.lower()]);
+            node.optional = OptionalStatus::Optional;
+            list.push(node);
         } else {
-            vec![]
+            return;
         };
-
-        Node::simple(children)
     }
 }
 
 impl Lower for Stmt {
     const RULE: R = R::Stmt;
     fn lower(self) -> Node {
-        let node = match self {
+        let mut node = match self {
             Stmt::Expr(e) => e.lower(),
             Stmt::Item(i) => i.lower(),
             Stmt::Local(l) => l.lower(),
@@ -881,7 +902,7 @@ impl Lower for Stmt {
             ),
         };
 
-        node.inner.borrow_mut().rule = Self::RULE;
+        node.rule = Self::RULE;
 
         node
     }
@@ -930,8 +951,7 @@ impl Lower for TraitBound {
             Node::new(NodeKind::regular(), R::Exempt, vec![])
         };
         {
-            let mut ninner = node.inner.borrow_mut();
-            let children = &mut ninner.children;
+            let children = &mut node.children.borrow_mut();
 
             self.modifier.lower_into(children);
             self.lifetimes.lower_into(children);
@@ -1015,8 +1035,7 @@ impl Lower for (Option<QSelf>, Path) {
 
         let node = Node::new(NodeKind::regular(), Self::RULE, vec![]);
         {
-            let mut ninner = node.inner.borrow_mut();
-            let children = &mut ninner.children;
+            let mut children = node.children.borrow_mut();
             children.push(qself.lt_token.lower());
             children.push(qself.ty.lower());
 
@@ -1024,7 +1043,7 @@ impl Lower for (Option<QSelf>, Path) {
             let mut segments = path.segments.into_pairs();
             if pos > 0 {
                 children.push(qself.as_token.unwrap_or_default().lower());
-                path.leading_colon.lower_into(children);
+                path.leading_colon.lower_into(&mut children);
 
                 let segments_node = {
                     let mut separate = None;
@@ -1058,7 +1077,7 @@ impl Lower for (Option<QSelf>, Path) {
                 children.push(segments_node);
             } else {
                 children.push(qself.gt_token.lower());
-                path.leading_colon.lower_into(children);
+                path.leading_colon.lower_into(&mut children);
             }
 
             let remaining = {
@@ -1135,29 +1154,8 @@ impl Lower for (token::Brace, Vec<Item>) {
     const RULE: R = R::Exempt;
     fn lower(self) -> Node {
         let node = self.0.lower_start();
-        node.inner.borrow_mut().children.push(self.1.lower_star());
+        node.children.borrow_mut().push(self.1.lower_star());
         self.0.lower_end(&node);
         node
-    }
-}
-
-impl LowerOpt for Visibility {
-    fn lower_into(self, list: &mut Vec<Node>) {
-        match self {
-            Self::Public(v) => list.push(v.lower()),
-            Self::Crate(v) => list.push(v.lower()),
-            Self::Restricted(v) => list.push(v.lower()),
-            Self::Inherited => {}
-        }
-    }
-}
-
-impl LowerOpt for Fields {
-    fn lower_into(self, list: &mut Vec<Node>) {
-        match self {
-            Self::Named(v) => list.push(v.lower()),
-            Self::Unnamed(v) => list.push(v.lower()),
-            Self::Unit => {}
-        }
     }
 }
