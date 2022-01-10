@@ -1,5 +1,5 @@
 [package]
-name = "reducetests"
+name = "reduceit"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,6 +7,5 @@ edition = "2021"
 
 [dependencies]
 ducere = { path = "../" }
-syn = { features = ["full"], version = "1.0" }
-tempfile = "3.2.0"
-tracing-subscriber = "0.3.2"
+syn = "1.0"
+tracing-subscriber = { version = "0.3.2", features = ["env-filter"] }

@@ -4,8 +4,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use reduceit::lower::Lower;
-use reduceit::Reducer;
+use ducere::lower::Lower;
+use ducere::Reducer;
 use tempfile::Builder;
 
 pub fn run(path: PathBuf) {
@@ -26,7 +26,7 @@ fn run_(path: PathBuf) -> Result<(), Box<dyn Error>> {
 
     let reducer = Reducer {
         root: node,
-        rule: reduceit::ReduceRule::Fn(Box::new(move |tmp| {
+        rule: ducere::ReduceRule::Fn(Box::new(move |tmp| {
             let prog = tmp.path().parent().unwrap().join("prog");
 
             if !Command::new("rustc")

@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+
 pub(crate) mod counting;
 pub use counting::TokenCountingVec;
 
@@ -9,13 +10,16 @@ use std::cell::RefCell;
 use std::mem::{self, discriminant};
 use std::path::PathBuf;
 use std::process::Command;
+use std::rc::Rc;
 use std::{fmt, io};
 
 use dd::Criteria;
-use proc_macro2::TokenStream;
 
+use proc_macro2::TokenStream;
 use smol_str::SmolStr;
 use tempfile::{Builder, NamedTempFile};
+
+use tracing::info;
 
 /// how a node is organized
 #[derive(Clone)]
@@ -120,7 +124,7 @@ pub struct Node {
     /// allowed to be deleted from the tree.
     optional: OptionalStatus,
     rule: ReplacementRule,
-    children: RefCell<Vec<Node>>,
+    children: Rc<RefCell<Vec<Node>>>,
     tokens: usize,
 }
 
@@ -130,7 +134,7 @@ impl Node {
         Self {
             kind: RefCell::new(kind),
             rule,
-            children: RefCell::new(children.vec),
+            children: Rc::new(RefCell::new(children.vec)),
             tokens: children.tokens,
             optional: OptionalStatus::Required,
         }
@@ -148,7 +152,7 @@ impl Node {
             kind: RefCell::new(NodeKind::Regular { s }),
             optional: OptionalStatus::Optional,
             rule: ReplacementRule::Exempt,
-            children: RefCell::default(),
+            children: Rc::default(),
             tokens: 0,
         }
     }
@@ -159,7 +163,7 @@ impl Node {
             kind: RefCell::new(NodeKind::Regular { s }),
             optional: OptionalStatus::Required,
             rule: ReplacementRule::Exempt,
-            children: RefCell::default(),
+            children: Rc::default(),
             tokens: 1,
         }
     }
@@ -204,7 +208,7 @@ impl Reducer {
         res
     }
 
-    fn reduce_inner(&self, node: &Node, kleene: bool) -> io::Result<()> {
+    fn reduce_inner(&self, node: &Node) -> io::Result<()> {
         if let OptionalStatus::Optional = node.optional {
             // if we can delete the thing..
             if self.try_replace_node_with(node, String::new())? {
@@ -215,13 +219,16 @@ impl Reducer {
                 };
                 // .. and remove its children.
                 node.children.borrow_mut().clear();
+
+                let tokens = node.tokens;
+                info!("delected {tokens} tokens by removing optional node");
+
                 // nothing to recurse
                 return Ok(());
             }
         }
 
         let kind = node.kind.borrow();
-
         match &*kind {
             NodeKind::KleeneStar | NodeKind::KleenePlus => {
                 drop(kind);
@@ -237,35 +244,53 @@ impl Reducer {
                     },
                 );
 
-                *node.children.borrow_mut() = items;
+                let token_diff = node.tokens - items.iter().map(|n| n.tokens).sum::<usize>();
 
-                for c in &*node.children.borrow() {
-                    self.reduce_inner(c, true)?;
+                if token_diff > 0 {
+                    info!("delected {token_diff} tokens via delta debugging");
                 }
+
+                *node.children.borrow_mut() = items;
             }
             NodeKind::Regular { .. } => {
                 drop(kind);
-                // we need a bounded breadth first search.
 
-                let oldnoderule = node.rule;
+                let replacee = &node.rule;
 
-                let mut queue = vec![node.children.borrow()];
+                let mut queue = vec![(node.children.clone(), 0u8)];
+                let mut best = (node.tokens, node.children.clone());
 
-                'outer: while !queue.is_empty() {
-                    let children = queue.pop().unwrap();
+                while !queue.is_empty() {
+                    let (children, depth) = queue.pop().unwrap();
 
-                    for c in &*children {
-                        if c.rule.replaces(&oldnoderule) {
-                            todo!()
+                    for c in &*children.borrow() {
+                        if c.rule.replaces(replacee) && c.tokens < best.0 {
+                            let prevchildren = node.children.replace(c.children.take());
+                            let result = self.try_();
+                            *c.children.borrow_mut() = node.children.replace(prevchildren);
+
+                            if result? {
+                                best = (c.tokens, c.children.clone());
+                            }
+                        }
+
+                        if depth < 4 {
+                            queue.push((c.children.clone(), depth + 1));
                         }
                     }
                 }
 
-                for c in &*node.children.borrow() {
-                    self.reduce_inner(c, false)?;
+                let token_diff = node.tokens - best.0;
+                if token_diff  > 0 {
+                    info!("deleted {token_diff} tokens via replacement");
+                    *node.children.borrow_mut() = best.1.take();
                 }
             }
             NodeKind::Temp(_) => unreachable!(),
+        }
+
+        for c in &*node.children.borrow() {
+            self.reduce_inner(c)?;
         }
 
         Ok(())
@@ -273,7 +298,7 @@ impl Reducer {
 
     pub fn reduce(&self) -> io::Result<()> {
         assert!(self.try_()?);
-        self.reduce_inner(&self.root, false)
+        self.reduce_inner(&self.root)
     }
 }
 

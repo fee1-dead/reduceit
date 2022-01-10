@@ -16,8 +16,9 @@ extern crate test;
 mod runtest;
 
 fn main() -> io::Result<()> {
+    tracing_subscriber::fmt::init();
     if std::fs::read_to_string("./test/src/main.rs")? != include_str!("main.rs") {
-        panic!("reduceit tests must be run at the project root.");
+        panic!("ducere tests must be run at the project root.");
     }
     let args: Vec<_> = args().collect();
     let tests = collect_tests()?

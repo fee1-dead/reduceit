@@ -1,10 +1,10 @@
 [package]
-name = "reduceit"
+name = "ducere"
 version = "0.1.0"
 edition = "2021"
 
 [workspace]
-members = ["test"]
+members = ["test", "reduceit"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -23,3 +23,6 @@ version = "0.1"
 
 [dependencies.tempfile]
 version = "3.2.0"
+
+[dependencies.tracing]
+version = "0.1.29"

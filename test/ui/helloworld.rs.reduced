@@ -1,5 +1,4 @@
 fn main() {
-    if true {
-        println!("Hello, world!");
-    }
+    print!("Hello, ");
+    println!("world!");
 }

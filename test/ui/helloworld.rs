@@ -4,9 +4,13 @@
 pub fn main() -> () {
     if false {
         std::println!("goodbye, world");
+    } else {
+        std::print!("Hello, ");
     }
 
     if true {
-        std::println!("Hello, world!");
+        1 + 1;
+        std::println!("world!");
+        2 + 2;
     }
 }
