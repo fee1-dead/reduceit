@@ -10,7 +10,7 @@ use quote::ToTokens;
 use syn::punctuated::Pair;
 use syn::*;
 
-use crate::{Node, NodeKind, OptionalStatus, ReplacementRule as R};
+use crate::{tvec, Node, NodeKind, OptionalStatus, ReplacementRule as R, TokenCountingVec};
 
 use super::{Lower, LowerDelim, LowerKleene, LowerOpt};
 
@@ -22,7 +22,7 @@ macro_rules! option_like_lower_impl {
     )*) => {$(
         impl LowerOpt for $Ty {
             #[inline]
-            fn lower_into(self, list: &mut Vec<Node>) {
+            fn lower_into(self, list: &mut TokenCountingVec) {
                 let mut node = match self {
                     $(Self::$Some(v) => v.lower(),)*
                     Self::$None => return,
@@ -45,16 +45,12 @@ macro_rules! struct_lower_impl {
         N
     }};
     (@lower( $self:ident $children:ident $field:ident ( $( [$($tt:tt)*] ),* $(,)? ))) => {{
-        let n = $self.$field.lower_start();
+        let mut children = $self.$field.lower_start();
+        let c = &mut children;
         {
-            let mut nb = n.children.borrow_mut();
-            let nchildren = &mut *nb;
-
-            $(struct_lower_impl!(@lower($self nchildren $($tt)*));)*
+            $(struct_lower_impl!(@lower($self c $($tt)*));)*
         }
-        $self.$field.lower_end(&n);
-
-        $children.push(n);
+        $children.push($self.$field.lower_end(children));
     }};
     (@lower( $self:ident $children:ident $field:ident)) => {{
         $children.push($self.$field.lower());
@@ -79,7 +75,7 @@ macro_rules! struct_lower_impl {
         impl Lower for $Ty {
             const RULE: R = R::$rule;
             fn lower(self) -> Node {
-                let mut children = Vec::with_capacity(struct_lower_impl!(@count_tts( $([ $($tt)* ]),* )));
+                let mut children = TokenCountingVec::with_capacity(struct_lower_impl!(@count_tts( $([ $($tt)* ]),* )));
                 let c = &mut children;
                 $(
                     struct_lower_impl!(@lower( self c $($tt)* ));
@@ -106,13 +102,13 @@ macro_rules! simple_enum_lower_impl {
                         Self::$Variant(v) => v.lower(),
                     )*
                     $(
-                        Self::$Verbatim(ts) => Node::verbatim(Self::RULE, ts),
+                        Self::$Verbatim(ts) => Node::verbatim(ts),
                     )?
                     $(
                         #[cfg(test)]
                         Self::$testexhaustive(_) => unimplemented!(),
                         #[cfg(not(test))]
-                        _ => Node::verbatim(Self::RULE, self.into_token_stream())
+                        _ => Node::verbatim(self.into_token_stream())
                     )?
                 };
                 node.rule = Self::RULE;
@@ -843,30 +839,24 @@ impl Lower for Attribute {
     const RULE: R = R::Attribute;
 
     fn lower(self) -> Node {
-        let mut children = vec![self.pound_token.lower()];
+        let mut children = tvec![self.pound_token.lower()];
         self.style.lower_into(&mut children);
-        let node = self.bracket_token.lower_start();
 
-        {
-            let mut children = node.children.borrow_mut();
-
-            if let Ok(meta) = self.parse_meta() {
-                children.push(meta.lower());
-            } else {
-                children.push(self.path.lower());
-                children.push(self.tokens.lower());
-            }
+        let mut c = self.bracket_token.lower_start();
+        if let Ok(meta) = self.parse_meta() {
+            c.push(meta.lower());
+        } else {
+            c.push(self.path.lower());
+            c.push(self.tokens.lower());
         }
-
-        self.bracket_token.lower_end(&node);
-        children.push(node);
+        children.push(self.bracket_token.lower_end(c));
 
         Node::simple(children)
     }
 }
 
 impl LowerOpt for PathArguments {
-    fn lower_into(self, list: &mut Vec<Node>) {
+    fn lower_into(self, list: &mut TokenCountingVec) {
         match self {
             Self::Parenthesized(v) => list.push(v.lower()),
             Self::AngleBracketed(v) => list.push(v.lower()),
@@ -877,9 +867,9 @@ impl LowerOpt for PathArguments {
 
 impl LowerOpt for ReturnType {
     #[inline]
-    fn lower_into(self, list: &mut Vec<Node>) {
+    fn lower_into(self, list: &mut TokenCountingVec) {
         if let Self::Type(arr, ty) = self {
-            let mut node = Node::simple(vec![arr.lower(), ty.lower()]);
+            let mut node = Node::simple(tvec![arr.lower(), ty.lower()]);
             node.optional = OptionalStatus::Optional;
             list.push(node);
         }
@@ -896,7 +886,7 @@ impl Lower for Stmt {
             Stmt::Semi(exp, semi) => Node::new(
                 NodeKind::regular(),
                 Self::RULE,
-                vec![exp.lower(), semi.lower()],
+                tvec![exp.lower(), semi.lower()],
             ),
         };
 
@@ -909,7 +899,7 @@ impl Lower for Stmt {
 impl Lower for Local {
     const RULE: R = R::Local;
     fn lower(self) -> Node {
-        let mut children = vec![
+        let mut children = tvec![
             self.attrs.lower_star(),
             self.let_token.lower(),
             self.pat.lower(),
@@ -926,7 +916,7 @@ impl Lower for Local {
 impl Lower for Arm {
     const RULE: R = R::Arm;
     fn lower(self) -> Node {
-        let mut children = Vec::with_capacity(5);
+        let mut children = TokenCountingVec::with_capacity(5);
         children.push(self.attrs.lower_star());
         children.push(self.pat.lower());
         if let Some((iif, exp)) = self.guard {
@@ -943,29 +933,28 @@ impl Lower for Arm {
 impl Lower for TraitBound {
     const RULE: R = R::Exempt;
     fn lower(self) -> Node {
-        let node = if let Some(p) = &self.paren_token {
+        let mut children = if let Some(p) = &self.paren_token {
             p.lower_start()
         } else {
-            Node::new(NodeKind::regular(), R::Exempt, vec![])
+            tvec![]
         };
-        {
-            let children = &mut node.children.borrow_mut();
 
-            self.modifier.lower_into(children);
-            self.lifetimes.lower_into(children);
-            children.push(self.path.lower());
-        }
+        self.modifier.lower_into(&mut children);
+        self.lifetimes.lower_into(&mut children);
+        children.push(self.path.lower());
+
         if let Some(p) = &self.paren_token {
-            p.lower_end(&node);
+            p.lower_end(children)
+        } else {
+            Node::simple(children)
         }
-        node
     }
 }
 
 impl Lower for ExprIf {
     const RULE: R = R::Exempt;
     fn lower(self) -> Node {
-        let mut children = vec![
+        let mut children = tvec![
             self.attrs.lower_star(),
             self.if_token.lower(),
             self.cond.lower(),
@@ -982,7 +971,7 @@ impl Lower for ExprIf {
 impl Lower for PatIdent {
     const RULE: R = R::Exempt;
     fn lower(self) -> Node {
-        let mut children = vec![self.attrs.lower_star()];
+        let mut children = tvec![self.attrs.lower_star()];
         self.by_ref.lower_into(&mut children);
         self.mutability.lower_into(&mut children);
         children.push(self.ident.lower());
@@ -997,24 +986,24 @@ impl Lower for PatIdent {
 impl Lower for ExprPath {
     const RULE: R = R::Exempt;
     fn lower(self) -> Node {
-        let children = vec![self.attrs.lower_star(), (self.qself, self.path).lower()];
-        Node::new(NodeKind::regular(), R::Exempt, children)
+        let children = tvec![self.attrs.lower_star(), (self.qself, self.path).lower()];
+        Node::simple(children)
     }
 }
 
 impl Lower for PatPath {
     const RULE: R = R::Exempt;
     fn lower(self) -> Node {
-        let children = vec![self.attrs.lower_star(), (self.qself, self.path).lower()];
-        Node::new(NodeKind::regular(), R::Exempt, children)
+        let children = tvec![self.attrs.lower_star(), (self.qself, self.path).lower()];
+        Node::simple(children)
     }
 }
 
 impl Lower for TypePath {
     const RULE: R = R::Exempt;
     fn lower(self) -> Node {
-        let children = vec![(self.qself, self.path).lower()];
-        Node::new(NodeKind::regular(), R::Exempt, children)
+        let children = tvec![(self.qself, self.path).lower()];
+        Node::simple(children)
     }
 }
 
@@ -1031,9 +1020,8 @@ impl Lower for (Option<QSelf>, Path) {
             return path.lower();
         };
 
-        let node = Node::new(NodeKind::regular(), Self::RULE, vec![]);
+        let mut children = tvec![];
         {
-            let mut children = node.children.borrow_mut();
             children.push(qself.lt_token.lower());
             children.push(qself.ty.lower());
 
@@ -1045,7 +1033,7 @@ impl Lower for (Option<QSelf>, Path) {
 
                 let segments_node = {
                     let mut separate = None;
-                    let mut kleene = Vec::with_capacity(segments.len());
+                    let mut kleene = TokenCountingVec::with_capacity(segments.len());
                     for (i, pair) in segments.by_ref().take(pos).enumerate() {
                         if i + 1 == pos {
                             separate = Some(pair.into_tuple());
@@ -1056,20 +1044,20 @@ impl Lower for (Option<QSelf>, Path) {
                                 let vnode = v.lower();
                                 let pnode = p.lower();
                                 let tuple =
-                                    Node::new(NodeKind::regular(), R::Exempt, vec![vnode, pnode]);
+                                    Node::new(NodeKind::regular(), R::Exempt, tvec![vnode, pnode]);
                                 kleene.push(tuple);
                             }
                             Pair::End(_) => unreachable!(),
                         }
                     }
-                    let mut children = vec![Node::new(NodeKind::KleeneStar, R::Exempt, kleene)];
+                    let mut children = tvec![Node::new(NodeKind::KleeneStar, R::Exempt, kleene)];
                     let (path, punct) = separate.unwrap();
 
                     children.push(path.lower());
                     children.push(qself.gt_token.lower());
                     punct.lower_into(&mut children);
 
-                    Node::new(NodeKind::regular(), R::Exempt, children)
+                    Node::simple(children)
                 };
 
                 children.push(segments_node);
@@ -1080,29 +1068,29 @@ impl Lower for (Option<QSelf>, Path) {
 
             let remaining = {
                 let mut opt_trailing_punct = None;
-                let mut kleene = Vec::with_capacity(segments.len());
+                let mut kleene = TokenCountingVec::with_capacity(segments.len());
                 for pair in segments {
                     match pair {
                         Pair::Punctuated(v, p) => {
                             let vnode = v.lower();
                             let pnode = p.lower();
                             let tuple =
-                                Node::new(NodeKind::regular(), R::Exempt, vec![vnode, pnode]);
+                                Node::new(NodeKind::regular(), R::Exempt, tvec![vnode, pnode]);
                             kleene.push(tuple);
                         }
                         Pair::End(p) => opt_trailing_punct = Some(p),
                     }
                 }
-                let mut children = vec![Node::new(NodeKind::KleeneStar, R::Exempt, kleene)];
+                let mut children = tvec![Node::new(NodeKind::KleeneStar, R::Exempt, kleene)];
                 opt_trailing_punct.lower_into(&mut children);
 
-                Node::new(NodeKind::regular(), R::Exempt, children)
+                Node::simple(children)
             };
 
             children.push(remaining);
         }
 
-        node
+        Node::simple(children)
     }
 }
 
@@ -1115,7 +1103,7 @@ macro_rules! tuple_lower_impl {
         impl Lower for ($ty1, $ty2) {
             const RULE: R = R::Exempt;
             fn lower(self) -> Node {
-                Node::new(NodeKind::regular(), R::Exempt, vec![self.0.lower(), self.1.lower()])
+                Node::new(NodeKind::regular(), R::Exempt, tvec![self.0.lower(), self.1.lower()])
             }
         }
     )*};
@@ -1131,7 +1119,7 @@ tuple_lower_impl! {
 impl Lower for (Token![&], Option<Lifetime>) {
     const RULE: R = R::Exempt;
     fn lower(self) -> Node {
-        let mut children = vec![self.0.lower()];
+        let mut children = tvec![self.0.lower()];
         self.1.lower_into(&mut children);
         Node::new(NodeKind::regular(), R::Exempt, children)
     }
@@ -1140,7 +1128,7 @@ impl Lower for (Token![&], Option<Lifetime>) {
 impl Lower for (Option<Token![!]>, Path, Token![for]) {
     const RULE: R = R::Exempt;
     fn lower(self) -> Node {
-        let mut children = Vec::with_capacity(2);
+        let mut children = TokenCountingVec::with_capacity(2);
         self.0.lower_into(&mut children);
         children.push(self.1.lower());
         children.push(self.2.lower());
@@ -1151,9 +1139,8 @@ impl Lower for (Option<Token![!]>, Path, Token![for]) {
 impl Lower for (token::Brace, Vec<Item>) {
     const RULE: R = R::Exempt;
     fn lower(self) -> Node {
-        let node = self.0.lower_start();
-        node.children.borrow_mut().push(self.1.lower_star());
-        self.0.lower_end(&node);
-        node
+        let mut children = self.0.lower_start();
+        children.push(self.1.lower_star());
+        self.0.lower_end(children)
     }
 }

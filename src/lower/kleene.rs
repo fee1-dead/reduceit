@@ -1,6 +1,6 @@
 use syn::punctuated::Punctuated;
 
-use crate::{Node, NodeKind, OptionalStatus, ReplacementRule};
+use crate::{tvec, Node, NodeKind, OptionalStatus, ReplacementRule};
 
 use super::Lower;
 
@@ -39,7 +39,7 @@ impl<T: Lower, P: Lower> LowerKleene for Punctuated<T, P> {
             .map(|pair| {
                 let (val, punct) = pair.into_tuple();
 
-                let mut children = vec![val.lower()];
+                let mut children = tvec![val.lower()];
 
                 if let Some(punct) = punct {
                     let mut node = punct.lower();

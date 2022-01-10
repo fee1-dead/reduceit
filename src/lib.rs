@@ -1,4 +1,7 @@
 #![forbid(unsafe_code)]
+pub(crate) mod counting;
+pub use counting::TokenCountingVec;
+
 pub mod dd;
 pub mod lower;
 
@@ -33,6 +36,13 @@ impl NodeKind {
         Self::Regular {
             s: SmolStr::new_inline(""),
         }
+    }
+}
+
+impl Default for NodeKind {
+    #[inline]
+    fn default() -> Self {
+        Self::regular()
     }
 }
 
@@ -111,28 +121,47 @@ pub struct Node {
     optional: OptionalStatus,
     rule: ReplacementRule,
     children: RefCell<Vec<Node>>,
+    tokens: usize,
 }
 
 impl Node {
     #[inline]
-    pub fn new(kind: NodeKind, rule: ReplacementRule, children: Vec<Node>) -> Self {
+    pub fn new(kind: NodeKind, rule: ReplacementRule, children: TokenCountingVec) -> Self {
         Self {
             kind: RefCell::new(kind),
             rule,
-            children: RefCell::new(children),
+            children: RefCell::new(children.vec),
+            tokens: children.tokens,
             optional: OptionalStatus::Required,
         }
     }
 
     #[inline]
-    pub fn simple(children: Vec<Node>) -> Self {
+    pub fn simple(children: TokenCountingVec) -> Self {
         Self::new(NodeKind::regular(), ReplacementRule::Exempt, children)
     }
 
     #[inline]
-    pub fn verbatim(rule: ReplacementRule, ts: TokenStream) -> Self {
+    pub fn verbatim(ts: TokenStream) -> Self {
         let s = SmolStr::new(ts.to_string());
-        Self::new(NodeKind::Regular { s }, rule, vec![])
+        Self {
+            kind: RefCell::new(NodeKind::Regular { s }),
+            optional: OptionalStatus::Optional,
+            rule: ReplacementRule::Exempt,
+            children: RefCell::default(),
+            tokens: 0,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn token(s: SmolStr) -> Self {
+        Self {
+            kind: RefCell::new(NodeKind::Regular { s }),
+            optional: OptionalStatus::Required,
+            rule: ReplacementRule::Exempt,
+            children: RefCell::default(),
+            tokens: 1,
+        }
     }
 }
 
@@ -175,7 +204,7 @@ impl Reducer {
         res
     }
 
-    fn reduce_inner(&self, node: &Node) -> io::Result<()> {
+    fn reduce_inner(&self, node: &Node, kleene: bool) -> io::Result<()> {
         if let OptionalStatus::Optional = node.optional {
             // if we can delete the thing..
             if self.try_replace_node_with(node, String::new())? {
@@ -200,15 +229,43 @@ impl Reducer {
                 let mut items = mem::take(&mut *node.children.borrow_mut());
                 // the branch criteria will replace the kleene node
                 // with a temp string containing formatted node. It's children must be empty.
-                dd::ddmin(&mut items, &mut Branch { reducer: self, kleene: node });
+                dd::ddmin(
+                    &mut items,
+                    &mut Branch {
+                        reducer: self,
+                        kleene: node,
+                    },
+                );
 
                 *node.children.borrow_mut() = items;
-            }
-            _ => {}
-        }
 
-        for c in &*node.children.borrow() {
-            self.reduce_inner(c)?;
+                for c in &*node.children.borrow() {
+                    self.reduce_inner(c, true)?;
+                }
+            }
+            NodeKind::Regular { .. } => {
+                drop(kind);
+                // we need a bounded breadth first search.
+
+                let oldnoderule = node.rule;
+
+                let mut queue = vec![node.children.borrow()];
+
+                'outer: while !queue.is_empty() {
+                    let children = queue.pop().unwrap();
+
+                    for c in &*children {
+                        if c.rule.replaces(&oldnoderule) {
+                            todo!()
+                        }
+                    }
+                }
+
+                for c in &*node.children.borrow() {
+                    self.reduce_inner(c, false)?;
+                }
+            }
+            NodeKind::Temp(_) => unreachable!(),
         }
 
         Ok(())
@@ -216,7 +273,7 @@ impl Reducer {
 
     pub fn reduce(&self) -> io::Result<()> {
         assert!(self.try_()?);
-        self.reduce_inner(&self.root)
+        self.reduce_inner(&self.root, false)
     }
 }
 

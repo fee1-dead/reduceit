@@ -29,6 +29,6 @@ impl Lower for TokenStream {
     const RULE: ReplacementRule = ReplacementRule::Exempt;
     #[inline]
     fn lower(self) -> Node {
-        Node::verbatim(Self::RULE, self)
+        Node::verbatim(self)
     }
 }

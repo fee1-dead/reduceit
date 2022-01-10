@@ -4,7 +4,7 @@ use smol_str::SmolStr;
 use syn::token::*;
 use syn::{Index, Lifetime, Lit, LitStr};
 
-use crate::{lower::Lower, Node, NodeKind, ReplacementRule};
+use crate::{lower::Lower, Node, ReplacementRule};
 
 macro_rules! token_lower_impl {
     (
@@ -14,9 +14,7 @@ macro_rules! token_lower_impl {
             const RULE: ReplacementRule = ReplacementRule::Exempt;
             #[inline]
             fn lower(self) -> Node {
-                Node::new(NodeKind::Regular {
-                    s: SmolStr::new_inline($lit),
-                }, Self::RULE, vec![])
+                Node::token(SmolStr::new_inline($lit))
             }
         }
     )+};
@@ -131,7 +129,7 @@ impl Lower for Ident {
     #[inline]
     fn lower(self) -> Node {
         let s = self.to_string();
-        Node::new(NodeKind::Regular { s: SmolStr::new(s) }, Self::RULE, vec![])
+        Node::token(s.into())
     }
 }
 
@@ -141,7 +139,7 @@ impl Lower for Lit {
     #[inline]
     fn lower(self) -> Node {
         let s = self.into_token_stream().to_string();
-        Node::new(NodeKind::Regular { s: SmolStr::new(s) }, Self::RULE, vec![])
+        Node::token(s.into())
     }
 }
 
@@ -151,7 +149,7 @@ impl Lower for LitStr {
     #[inline]
     fn lower(self) -> Node {
         let s = self.into_token_stream().to_string();
-        Node::new(NodeKind::Regular { s: SmolStr::new(s) }, Self::RULE, vec![])
+        Node::token(s.into())
     }
 }
 
@@ -161,7 +159,7 @@ impl Lower for Lifetime {
     #[inline]
     fn lower(self) -> Node {
         let s = format!("'{}", self.ident);
-        Node::new(NodeKind::Regular { s: SmolStr::new(s) }, Self::RULE, vec![])
+        Node::token(s.into())
     }
 }
 
@@ -171,6 +169,6 @@ impl Lower for Index {
     #[inline]
     fn lower(self) -> Node {
         let s = self.index.to_string();
-        Node::new(NodeKind::Regular { s: SmolStr::new(s) }, Self::RULE, vec![])
+        Node::token(s.into())
     }
 }
