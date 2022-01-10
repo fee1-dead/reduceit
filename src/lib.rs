@@ -221,7 +221,7 @@ impl Reducer {
                 node.children.borrow_mut().clear();
 
                 let tokens = node.tokens;
-                info!("delected {tokens} tokens by removing optional node");
+                info!("deleted {tokens} tokens by removing optional node");
 
                 // nothing to recurse
                 return Ok(());
@@ -247,7 +247,7 @@ impl Reducer {
                 let token_diff = node.tokens - items.iter().map(|n| n.tokens).sum::<usize>();
 
                 if token_diff > 0 {
-                    info!("delected {token_diff} tokens via delta debugging");
+                    info!("deleted {token_diff} tokens via delta debugging");
                 }
 
                 *node.children.borrow_mut() = items;
